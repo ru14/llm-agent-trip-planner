@@ -1,135 +1,101 @@
-# Deployment Guide
+# Deployment Guide – AgentsVille AI Trip Planner
 
-This guide explains how to set up and run the AgentsVille AI Trip Planner in
-different environments.
+Step-by-step instructions for running the system locally or on Vocareum.
 
 ---
 
-## Local Development
+## Local Setup
 
-### Prerequisites
-
-- Python 3.9 or later
-- pip 21+
-- An OpenAI API key
-
-### Setup
+### 1. Clone the Repository
 
 ```bash
-# Clone the repository
 git clone https://github.com/ru14/llm-agent-trip-planner.git
 cd llm-agent-trip-planner
+```
 
-# Create a virtual environment (strongly recommended)
+### 2. Create a Virtual Environment
+
+```bash
 python -m venv .venv
-source .venv/bin/activate        # macOS / Linux
-# .venv\Scripts\activate         # Windows PowerShell
+source .venv/bin/activate      # Linux / macOS
+# .venv\Scripts\activate       # Windows
+```
 
-# Install dependencies
+### 3. Install Dependencies
+
+```bash
 pip install -r requirements.txt
+```
 
-# Set your OpenAI API key
-export OPENAI_API_KEY="sk-..."   # macOS / Linux
+This installs: `openai`, `pydantic`, `jupyter`, `notebook`, `ipykernel`.
+
+### 4. Configure the OpenAI API Key
+
+```bash
+export OPENAI_API_KEY="sk-..."   # Linux / macOS
 # set OPENAI_API_KEY=sk-...      # Windows cmd
-# $Env:OPENAI_API_KEY="sk-..."   # Windows PowerShell
+# $env:OPENAI_API_KEY="sk-..."   # Windows PowerShell
+```
 
-# Launch Jupyter
+### 5. Launch Jupyter
+
+```bash
 jupyter notebook
 ```
 
-Then open `project_starter.ipynb` in the browser.
+Open `project_starter.ipynb` in the browser and run all cells from top to bottom.
 
 ---
 
-## Classroom / Shared Environment
+## Vocareum Setup
 
-1. Distribute the repository (zip or git clone).
-2. Students create their own virtual environment and install dependencies.
-3. Each student sets their own `OPENAI_API_KEY`.
-4. Open `project_starter.ipynb` and run cells top-to-bottom.
-
-### Using `.env` files (optional)
-
-```bash
-pip install python-dotenv
-```
-
-Create `.env` in the project root:
-```
-OPENAI_API_KEY=sk-...
-```
-
-Add to the top of the first notebook cell:
-```python
-from dotenv import load_dotenv
-load_dotenv()
-```
-
-> **Security:** Never commit `.env` files to git. The `.gitignore` already
-> excludes `.env` patterns.
-
----
-
-## Running with VS Code
-
-1. Open the project folder in VS Code.
-2. Install the **Jupyter** extension.
-3. Select your virtual environment as the Python interpreter
-   (`Ctrl+Shift+P` → "Python: Select Interpreter").
-4. Open `project_starter.ipynb` and click **Run All**.
+1. In the Vocareum workspace, open a terminal.
+2. Run `pip install -r requirements.txt --quiet`.
+3. In the Environment Variables panel, add `OPENAI_API_KEY` = your key.
+4. Open `project_starter.ipynb`.
+5. Select **Kernel → Restart & Run All**.
 
 ---
 
 ## Running the Test Suite
 
 ```bash
-# With Jupyter from the command line
-jupyter nbconvert --to notebook --execute test_scenarios.ipynb \
-    --output test_scenarios_output.ipynb
-
-# Or open in Jupyter and run all cells manually
 jupyter notebook test_scenarios.ipynb
 ```
 
----
-
-## Model Configuration
-
-Edit the model constants at the top of each notebook:
-
-```python
-MAIN_MODEL = "gpt-4o"        # higher quality, higher cost
-EVAL_MODEL = "gpt-4o-mini"   # faster and cheaper for evaluations
-```
-
-**Recommended models:**
-
-| Use case | Model | Notes |
-|---|---|---|
-| Production / best quality | `gpt-4o` | Higher cost |
-| Development / testing | `gpt-4o-mini` | Faster, cheaper |
-| Budget-sensitive | `gpt-4o-mini` for both | May need more revision iterations |
+Select **Kernel → Restart & Run All** and wait for all 6 scenarios to complete.
+A summary table appears in the last cell showing pass/fail status for each scenario.
 
 ---
 
-## Cost Estimates
+## Configuration Options
 
-| Model | Typical cost per scenario | Notes |
-|---|---|---|
-| `gpt-4o` (main) + `gpt-4o-mini` (eval) | ~$0.05–$0.20 | Depends on trip length |
-| `gpt-4o-mini` for both | ~$0.01–$0.05 | May require more revisions |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAIN_MODEL` | `"gpt-4o"` | Model for itinerary generation and revision |
+| `EVAL_MODEL` | `"gpt-4o-mini"` | Model for weather compatibility evaluation |
+| `max_iterations` | `10` | Maximum ReAct loop iterations per revision |
 
-*Prices are approximate and subject to OpenAI pricing changes.*
+Change these in the notebook's setup cell or in the `ItineraryRevisionAgent`
+constructor call.
 
 ---
 
-## Troubleshooting Installation
+## Interpreting Results
 
-| Problem | Solution |
-|---|---|
-| `pip: command not found` | Use `pip3` or `python -m pip` |
-| `jupyter: command not found` | Activate the virtual environment first |
-| `ModuleNotFoundError: No module named 'openai'` | Run `pip install -r requirements.txt` |
-| Jupyter opens but kernel dies | Ensure the virtual environment's kernel is selected |
+- **`print_itinerary(plan)`** – shows day-by-day activities and costs.
+- **`print_eval_results(results)`** – shows ✅/❌ for each of the 5 checks.
+- **`reasoning_log`** – inspect `revision_agent.reasoning_log` to see every
+  THOUGHT, ACTION, and OBSERVATION in the ReAct loop.
+- **`outputs/`** – the final plan JSON is saved here after Step 8.
 
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for more issues.
+---
+
+## Common Configuration Issues
+
+| Issue | Fix |
+|-------|-----|
+| Wrong Python version | Ensure Python 3.8+ with `python --version` |
+| Jupyter not found | Run `pip install jupyter notebook` |
+| Kernel dies during execution | Increase memory limit in Jupyter settings |
+| Slow responses | Switch `MAIN_MODEL` to `"gpt-4o-mini"` for faster, cheaper runs |
