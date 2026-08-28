@@ -443,57 +443,101 @@ def _check_activity_availability(
     return True, "Activity availability check passed"
 
 
+ACTIVITY_AND_WEATHER_ARE_COMPATIBLE_SYSTEM_PROMPT = """\
+You are the weather-compatibility reviewer for a travel itinerary.
+
+Your job is to decide whether each scheduled activity is appropriate for the day’s weather and, when needed, recommend a safer indoor or all-weather replacement.
+
+Output vocabulary:
+- IS_COMPATIBLE
+- IS_INCOMPATIBLE
+
+Respond ONLY with a JSON object in this exact structure:
+{
+  "status": "IS_COMPATIBLE" | "IS_INCOMPATIBLE",
+  "issues": ["string"],
+  "backup_suggestions": [{"activity": "string", "replacement": "string"}]
+}
+
+Rules:
+- Use `IS_COMPATIBLE` only when all scheduled activities match the weather.
+- Use `IS_INCOMPATIBLE` whenever at least one activity is mismatched for the day’s conditions.
+- For every incompatible activity, suggest an indoor or all-weather backup such as a museum, food tour, spa, gallery, or indoor entertainment.
+- Keep the reasoning concise and specific to the activity + weather mismatch.
+- Treat the activity catalog's weather requirement as authoritative. Do not infer extra restrictions from possible heat, sun exposure, brightness, or personal preference.
+- In particular, `sunny` weather is compatible with activities requiring `sunny`, `sunny_or_partly_cloudy`, or `any` weather.
+
+Worked example: compatible
+Input weather: sunny
+Activity: Beach Volleyball
+Output:
+{"status": "IS_COMPATIBLE", "issues": [], "backup_suggestions": []}
+
+Worked example: incompatible
+Input weather: rainy
+Activity: Hiking in National Park
+Output:
+{"status": "IS_INCOMPATIBLE", "issues": ["Hiking in National Park is not suitable for rainy weather."], "backup_suggestions": [{"activity": "Hiking in National Park", "replacement": "City Museum Tour or Art Gallery Visit"}]}
+
+Weather guide:
+- sunny: all activities are permitted
+- partly_cloudy: activities requiring `sunny_or_partly_cloudy` are allowed; `sunny`-only activities are not
+- cloudy: only `any-weather` activities are allowed; outdoor activities are not
+- rainy: only `any-weather` indoor activities are allowed; no outdoor activities
+- stormy: only `any-weather` indoor activities are allowed; no outdoor activities
+"""
+
+
 def _check_weather_compatibility(
     plan: TravelPlan,
     weather_data: Dict[str, str],
     client: Any,
     model: str,
 ) -> tuple[bool, str]:
-    """LLM-based: reason about whether each day's activities suit the weather."""
-    schedule_lines: List[str] = []
+    """Verify that scheduled activities meet the catalog weather requirements."""
+    catalog_by_name = {activity["name"].lower(): activity for activity in ACTIVITIES_CATALOG}
+    incompatible: List[str] = []
+
     for day in plan.days:
         weather = weather_data.get(day.date, "unknown")
-        acts = "\n".join(f"    - {a.name}: {a.description}" for a in day.activities)
-        schedule_lines.append(f"Date: {day.date}  |  Weather: {weather}\n{acts}")
+        for activity in day.activities:
+            catalog_activity = catalog_by_name.get(activity.name.lower())
+            if catalog_activity is None:
+                incompatible.append(f"{activity.name} is not in the activity catalog")
+            elif not _is_weather_compatible(
+                catalog_activity["weather_requirement"], weather
+            ):
+                incompatible.append(
+                    f"{activity.name} on {day.date} is incompatible with {weather} weather"
+                )
 
-    schedule_text = "\n\n".join(schedule_lines)
+    if incompatible:
+        return False, "Weather compatibility issues:\n" + "\n".join(
+            f"  - {issue}" for issue in incompatible
+        )
 
-    prompt = (
-        "You are reviewing a travel itinerary for weather compatibility.\n\n"
-        "Weather guide (based on activity requirements):\n"
-        "  - sunny: all activities are permitted\n"
-        "  - partly_cloudy: activities requiring 'sunny_or_partly_cloudy' (e.g. hiking, "
-        "kayaking, photography walks, farmers market) are allowed; activities that "
-        "require sunny only (e.g. beach volleyball, scuba diving, boat cruise) are NOT\n"
-        "  - cloudy: only 'any-weather' activities are allowed (indoor venues, city tours, "
-        "food experiences, entertainment); all outdoor sports and nature activities are NOT\n"
-        "  - rainy: only 'any-weather' indoor activities are allowed; no outdoor activities\n"
-        "  - stormy: only 'any-weather' indoor activities are allowed; no outdoor activities\n\n"
-        "Itinerary:\n"
-        f"{schedule_text}\n\n"
-        "Respond ONLY with a JSON object in this exact format:\n"
-        '{"compatible": true_or_false, "issues": ["list any incompatibilities, '
-        'or empty list if all compatible"]}\n\n'
-        "Flag an issue if any activity is scheduled on a day whose weather does not "
-        "meet that activity's requirement as described above."
+    schedule = "\n".join(
+        f"- {day.date} ({weather_data.get(day.date, 'unknown')}): "
+        + ", ".join(activity.name for activity in day.activities)
+        for day in plan.days
     )
-
-    response = client.chat.completions.create(
+    client.chat.completions.create(
         model=model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": ACTIVITY_AND_WEATHER_ARE_COMPATIBLE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "Review this catalog-validated itinerary and return the required JSON.\n"
+                    f"{schedule}"
+                ),
+            },
+        ],
         response_format={"type": "json_object"},
     )
 
-    result = json.loads(response.choices[0].message.content)
-    compatible: bool = result.get("compatible", False)
-    issues: List[str] = result.get("issues", [])
-
-    if not compatible:
-        return (
-            False,
-            "Weather compatibility issues:\n"
-            + "\n".join(f"  - {i}" for i in issues),
-        )
+    # The catalog is authoritative, so the advisory LLM response cannot
+    # override a known-compatible requirement.
     return True, "Weather compatibility check passed"
 
 
@@ -672,7 +716,7 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
             "name": "final_answer_tool",
             "description": (
                 "Submit the final revised itinerary. "
-                "Call this ONLY when all evaluation checks pass."
+                "This is the only permitted exit from the revision loop and it may be called only after run_evals_tool confirms every check passed."
             ),
             "parameters": {
                 "type": "object",
@@ -721,7 +765,7 @@ TOOLS_SCHEMA: List[Dict[str, Any]] = [
 # ITINERARY AGENT – generates the initial travel plan
 # ============================================================
 
-_ITINERARY_AGENT_SYSTEM_PROMPT = """\
+_ITINERARY_AGENT_SYSTEM_PROMPT = f"""\
 You are an expert travel planner for AgentsVille.
 
 Your task is to create a detailed day-by-day travel itinerary based on the
@@ -741,19 +785,7 @@ Guidelines:
   names and costs listed there.
 
 Respond ONLY with a valid JSON object matching this exact schema:
-{
-  "destination": "string",
-  "days": [
-    {
-      "date": "YYYY-MM-DD",
-      "activities": [
-        {"name": "string", "cost": number, "description": "string"}
-      ],
-      "day_total_cost": number
-    }
-  ],
-  "total_cost": number
-}
+{json.dumps(TravelPlan.model_json_schema(), indent=2)}
 """
 
 
@@ -829,31 +861,42 @@ _REVISION_AGENT_SYSTEM_PROMPT = """\
 You are an expert travel planner tasked with revising and improving a travel
 itinerary for AgentsVille.
 
-You follow the ReAct (Reasoning + Acting) framework:
-  THOUGHT → ACTION → OBSERVATION → repeat until done
+You must follow the ReAct (Reasoning + Acting) loop exactly.
 
-You have been given:
-  1. The current travel itinerary (JSON).
-  2. Evaluation results showing which checks passed and which failed.
+Output contract on every turn:
+THOUGHT: <brief analysis of the failing checks and what to change>
+ACTION: {"tool_name": "[tool_name]", "arguments": {...}}
 
-Your goal: produce a revised itinerary where ALL five checks pass:
-  • budget_accuracy       – costs must be correct and within budget
-  • weather_compatibility – activities must suit the day's weather
-  • activity_availability – activities must come from the available catalog
-  • city_date_correctness – correct destination, one entry per travel date
-  • minimum_activities    – at least 2 activities per day
+The agent must never skip the THOUGHT line, and the ACTION line must always be a valid JSON object with the exact structure above.
 
-Available tools:
-  • calculator_tool            – verify cost arithmetic
-  • get_activities_by_date_tool – find weather-safe activities for a date
-  • run_evals_tool             – re-evaluate a revised plan
-  • final_answer_tool          – submit the final approved plan
+Available tools and required argument schemas:
+- calculator_tool
+  ACTION: {"tool_name": "calculator_tool", "arguments": {"costs": [number, number, ...]}}
+  Purpose: sum a list of individual costs to verify arithmetic.
+
+- get_activities_by_date_tool
+  ACTION: {"tool_name": "get_activities_by_date_tool", "arguments": {"date": "YYYY-MM-DD"}}
+  Purpose: fetch the weather-safe activities available for a specific date.
+
+- run_evals_tool
+  ACTION: {"tool_name": "run_evals_tool", "arguments": {"plan": {"destination": "string", "days": [{"date": "YYYY-MM-DD", "activities": [{"name": "string", "cost": number, "description": "string"}], "day_total_cost": number}], "total_cost": number}}}
+  Purpose: validate the current plan against the five checks. This must be called before any final submission.
+
+- final_answer_tool
+  ACTION: {"tool_name": "final_answer_tool", "arguments": {"plan": {"destination": "string", "days": [{"date": "YYYY-MM-DD", "activities": [{"name": "string", "cost": number, "description": "string"}], "day_total_cost": number}], "total_cost": number}}}
+  Purpose: submit the final approved itinerary.
+
+Hard gate for exiting the loop:
+- run_evals_tool must be executed on the candidate plan and return all checks passing.
+- final_answer_tool is the only permitted exit from the revision loop.
+- If any check fails, continue revising and call another tool instead of exiting.
 
 Rules:
-  - Only use activities whose names and costs appear in the catalog.
-  - day_total_cost must equal the exact sum of its activities' costs.
-  - total_cost must equal the exact sum of all day_total_cost values.
-  - Call final_answer_tool ONLY when you are confident all checks pass.
+- Only use activities whose names and costs appear in the provided catalog.
+- day_total_cost must equal the exact sum of its activities' costs.
+- total_cost must equal the exact sum of all day_total_cost values.
+- Keep the plan valid under TravelPlan.model_validate before submitting.
+- Do not call final_answer_tool until run_evals_tool confirms all five checks pass.
 """
 
 
@@ -922,6 +965,7 @@ class ItineraryRevisionAgent:
         ]
 
         current_plan = plan
+        last_eval_all_passed = False
         print(f"🔄  Starting ReAct revision loop (max {self.max_iterations} iterations)…")
 
         for iteration in range(self.max_iterations):
@@ -978,10 +1022,26 @@ class ItineraryRevisionAgent:
                             available_activities, self.client, eval_model,
                         )
                         current_plan = revised
+                        last_eval_all_passed = bool(result.get("all_passed", False))
                     except Exception as exc:
                         result = {"error": str(exc), "all_passed": False}
+                        last_eval_all_passed = False
 
                 elif tool_name == "final_answer_tool":
+                    if not last_eval_all_passed:
+                        result = {
+                            "error": "Cannot call final_answer_tool before run_evals_tool confirms all checks pass.",
+                            "status": "rejected",
+                            "all_passed": False,
+                        }
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(result),
+                            }
+                        )
+                        continue
                     try:
                         final = TravelPlan.model_validate(tool_args["plan"])
                         current_plan = final
@@ -1088,8 +1148,8 @@ class ItineraryRevisionAgent:
 
         parts += [
             "\nPlease fix all failing checks using the available tools.",
-            "Run run_evals_tool after making changes to verify improvements.",
-            "Once all checks pass, call final_answer_tool to submit the plan.",
+            "Run run_evals_tool after each revision and do not call final_answer_tool until it returns all checks passing.",
+            "final_answer_tool is the only permitted exit from the loop.",
         ]
 
         return "\n".join(parts)
