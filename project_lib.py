@@ -477,7 +477,7 @@ Worked example: incompatible
 Input weather: rainy
 Activity: Hiking in National Park
 Output:
-{"status": "IS_INCOMPATIBLE", "issues": ["Hiking in National Park is not suitable for rainy weather."], "backup_suggestions": [{"activity": "Hiking in National Park", "replacement": "City Museum Tour or Art Gallery Visit"}]}
+{"status": "IS_INCOMPATIBLE", "issues": ["Hiking in National Park is not suitable for rainy weather."], "backup_suggestions": [{"activity": "Hiking in National Park", "replacement": "City Museum [...]
 
 Weather guide:
 - sunny: all activities are permitted
@@ -861,13 +861,20 @@ _REVISION_AGENT_SYSTEM_PROMPT = """\
 You are an expert travel planner tasked with revising and improving a travel
 itinerary for AgentsVille.
 
-You must follow the ReAct (Reasoning + Acting) loop exactly.
+You must follow the ReAct cycle exactly and repeatedly:
+THOUGHT -> ACTION -> OBSERVATION -> THOUGHT -> ACTION -> OBSERVATION -> ...
 
-Output contract on every turn:
-THOUGHT: <brief analysis of the failing checks and what to change>
-ACTION: {"tool_name": "[tool_name]", "arguments": {...}}
+Per-turn protocol:
+1) THOUGHT: Briefly reason about current failures, what the previous observation means,
+   and the single next best step.
+2) ACTION: Call exactly one tool that best advances the fix.
+3) OBSERVATION: Treat the tool result as the authoritative observation.
+4) NEXT THOUGHT: Explicitly reason about that observation before choosing the next action.
 
-The agent must never skip the THOUGHT line, and the ACTION line must always be a valid JSON object with the exact structure above.
+Critical requirement after each tool call:
+- The returned tool result is the OBSERVATION.
+- You must analyze that OBSERVATION in your next THOUGHT before any further ACTION.
+- Do not chain blind tool calls without observation-driven reasoning.
 
 Available tools and required argument schemas:
 - calculator_tool
@@ -889,7 +896,7 @@ Available tools and required argument schemas:
 Hard gate for exiting the loop:
 - run_evals_tool must be executed on the candidate plan and return all checks passing.
 - final_answer_tool is the only permitted exit from the revision loop.
-- If any check fails, continue revising and call another tool instead of exiting.
+- If any check fails, continue the ReAct cycle and choose another action.
 
 Rules:
 - Only use activities whose names and costs appear in the provided catalog.
@@ -897,6 +904,19 @@ Rules:
 - total_cost must equal the exact sum of all day_total_cost values.
 - Keep the plan valid under TravelPlan.model_validate before submitting.
 - Do not call final_answer_tool until run_evals_tool confirms all five checks pass.
+
+Executed example of the required loop shape:
+- THOUGHT: Day 2 has a weather-incompatible activity; I need valid replacements for that date.
+- ACTION: get_activities_by_date_tool({"date": "2026-09-14"})
+- OBSERVATION: Returned 9 weather-safe activities for 2026-09-14.
+- THOUGHT: Based on the observation, I can replace the incompatible activity and then re-check totals.
+- ACTION: calculator_tool({"costs": [30, 45, 20]})
+- OBSERVATION: total_cost=95.0.
+- THOUGHT: Costs are consistent for the edited day; now I must verify the full plan.
+- ACTION: run_evals_tool({"plan": <revised_plan>})
+- OBSERVATION: all_passed=true.
+- THOUGHT: All checks passed, so I can exit via final submission.
+- ACTION: final_answer_tool({"plan": <revised_plan>})
 """
 
 
